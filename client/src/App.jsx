@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import "./App.css";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -237,6 +237,43 @@ function triggerDownload(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
+// ─── Import ───────────────────────────────────────────────────────────────────
+
+function hasCurrentWork(state) {
+  return state.stages.some((s, i) => {
+    if (i === 5) return !!s.instructorFeedback;
+    return s.aiOutput || s.approved ||
+      s.generalTopic || s.keywords || s.whyInterested ||
+      s.roughThoughts || s.whyMatters || s.additionalDetails;
+  });
+}
+
+function validateImport(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data))
+    throw new Error("File is not a valid JSON object.");
+  if (!Array.isArray(data.stages) || data.stages.length !== 7)
+    throw new Error("This file does not appear to be a Thesis Introduction Maker save file (expected 7 stages).");
+  if (typeof data.currentStage !== "number")
+    throw new Error("This file does not appear to be a Thesis Introduction Maker save file (missing currentStage).");
+  if (typeof data.stages[0]?.generalTopic !== "string")
+    throw new Error("This file does not appear to be a Thesis Introduction Maker save file (invalid Stage 1 data).");
+  if (typeof data.stages[5]?.instructorFeedback !== "string")
+    throw new Error("This file does not appear to be a Thesis Introduction Maker save file (invalid Stage 6 data).");
+}
+
+function normalizeImport(data) {
+  const initial = makeInitialState();
+  return {
+    currentStage: Math.min(Math.max(Math.floor(data.currentStage), 0), 6),
+    stages: initial.stages.map((defaultStage, i) => ({
+      ...defaultStage,
+      ...(data.stages[i] || {}),
+      showExtra: false,
+      extraThoughts: "",
+    })),
+  };
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function ProgressBar({ currentStage, stages, onNavigate }) {
@@ -469,6 +506,15 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showReset, setShowReset] = useState(false);
+  const [pendingImport, setPendingImport] = useState(null);
+  const [importMessage, setImportMessage] = useState(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    if (importMessage?.type !== "success") return;
+    const t = setTimeout(() => setImportMessage(null), 4000);
+    return () => clearTimeout(t);
+  }, [importMessage]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -529,6 +575,41 @@ export default function App() {
     setState(makeInitialState());
     setShowReset(false);
     setError("");
+  }
+
+  function handleImportClick() {
+    setImportMessage(null);
+    fileInputRef.current.value = "";
+    fileInputRef.current.click();
+  }
+
+  function handleFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        validateImport(data);
+        const normalized = normalizeImport(data);
+        if (hasCurrentWork(state)) {
+          setPendingImport(normalized);
+        } else {
+          applyImport(normalized);
+        }
+      } catch (err) {
+        setImportMessage({ type: "error", text: err.message });
+      }
+    };
+    reader.onerror = () => setImportMessage({ type: "error", text: "Could not read the file." });
+    reader.readAsText(file);
+  }
+
+  function applyImport(normalized) {
+    setState(normalized);
+    setPendingImport(null);
+    setError("");
+    setImportMessage({ type: "success", text: "Previous work imported successfully." });
   }
 
   function renderInputs() {
@@ -614,6 +695,14 @@ export default function App() {
       <header className="app-header">
         <h1>Thesis Introduction Maker V2</h1>
         <div className="header-actions">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: "none" }}
+            onChange={handleFileSelect}
+          />
+          <button className="btn btn--ghost-light" onClick={handleImportClick}>Import JSON</button>
           <button className="btn btn--ghost-light" onClick={() => exportJSON(state)}>Export JSON</button>
           <button className="btn btn--ghost-light" onClick={() => exportHTML(stages)}>Export HTML</button>
           <button className="btn btn--danger-ghost" onClick={() => setShowReset(true)}>Reset</button>
@@ -623,6 +712,14 @@ export default function App() {
       <ProgressBar currentStage={currentStage} stages={stages} onNavigate={goTo} />
 
       <main className="app-main">
+        {importMessage && (
+          <div className={`import-banner import-banner--${importMessage.type}`} role="alert">
+            {importMessage.type === "success" ? "✓ " : "✕ "}
+            {importMessage.text}
+            <button className="import-banner__close" onClick={() => setImportMessage(null)} aria-label="Dismiss">×</button>
+          </div>
+        )}
+
         <ApprovedSummary stages={stages} />
 
         {isComplete && (
@@ -664,6 +761,19 @@ export default function App() {
             <div className="btn-row">
               <button className="btn btn--danger" onClick={handleReset}>Yes, reset everything</button>
               <button className="btn btn--secondary" onClick={() => setShowReset(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingImport && (
+        <div className="modal-overlay" onClick={() => setPendingImport(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h2>Replace current work?</h2>
+            <p>You have existing work in progress. Importing this file will overwrite all current inputs, AI outputs, and approved stages. This cannot be undone.</p>
+            <div className="btn-row">
+              <button className="btn btn--primary" onClick={() => applyImport(pendingImport)}>Yes, import and replace</button>
+              <button className="btn btn--secondary" onClick={() => setPendingImport(null)}>Cancel</button>
             </div>
           </div>
         </div>
